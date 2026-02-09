@@ -1,27 +1,152 @@
-"""FastMCP server for deep agents with calculator and TODO tools.
+"""FastMCP server for deep agents with research, file, and TODO tools.
 
-This server exposes calculator and TODO management tools through the Model Context Protocol,
-allowing AI assistants to perform arithmetic operations and manage task lists.
+This server exposes research tools (Tavily search), file management, and TODO tracking
+through the Model Context Protocol, enabling AI agents to conduct research with context offloading.
 """
 
+import os
+import uuid
+import base64
+from datetime import datetime
 from typing import Annotated, List, Literal, NotRequired, Union
 
+import httpx
 from fastmcp import FastMCP
 from langchain.agents import create_agent
-from langchain_core.messages import ToolMessage
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, InjectedToolCallId, tool as tool_decorator
 from langgraph.prebuilt import InjectedState
 from langgraph.prebuilt.chat_agent_executor import AgentState
 from langgraph.types import Command
+from markdownify import markdownify
+from pydantic import BaseModel, Field
+from tavily import TavilyClient
 from typing_extensions import TypedDict
 
 # Create MCP server
 mcp = FastMCP("deep-agent")
 
+# Initialize Tavily client
+tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+
+# Summarization model for webpage content
+summarization_model = init_chat_model(model="openai:gpt-4o-mini")
+
 
 # ============================================================================
 # Prompts and Descriptions
 # ============================================================================
+
+def get_today_str() -> str:
+    """Get current date in a human-readable format."""
+    return datetime.now().strftime("%a %b %-d, %Y")
+
+SUMMARIZE_WEB_SEARCH = """You are analyzing webpage content from a web search result.
+
+Today's date: {date}
+
+Generate:
+1. A descriptive filename (e.g., "anthropic_mcp_overview.md", "react_hooks_guide.md")
+2. A concise summary of the key learnings (2-4 sentences)
+
+Webpage content:
+{webpage_content}
+
+Return structured output with filename and summary fields."""
+
+RESEARCHER_INSTRUCTIONS = """You are a research assistant conducting research on the user's input topic. For context, today's date is {date}.
+
+<Task>
+Your job is to use tools to gather information about the user's input topic.
+You can use any of the tools provided to you to find resources that can help answer the research question.
+You can call these tools in series or in parallel, your research is conducted in a tool-calling loop.
+</Task>
+
+<Available Tools>
+You have access to two main tools:
+1. **tavily_search**: For conducting web searches to gather information
+2. **think_tool**: For reflection and strategic planning during research
+
+**CRITICAL: Use think_tool after each search to reflect on results and plan next steps**
+</Available Tools>
+
+<Instructions>
+Think like a human researcher with limited time. Follow these steps:
+
+1. **Read the question carefully** - What specific information does the user need?
+2. **Start with broader searches** - Use broad, comprehensive queries first
+3. **After each search, pause and assess** - Do I have enough to answer? What's still missing?
+4. **Execute narrower searches as you gather information** - Fill in the gaps
+5. **Stop when you can answer confidently** - Don't keep searching for perfection
+</Instructions>
+
+<Hard Limits>
+**Tool Call Budgets** (Prevent excessive searching):
+- **Simple queries**: Use 1-2 search tool calls maximum
+- **Normal queries**: Use 2-3 search tool calls maximum
+- **Very Complex queries**: Use up to 5 search tool calls maximum
+- **Always stop**: After 5 search tool calls if you cannot find the right sources
+
+**Stop Immediately When**:
+- You can answer the user's question comprehensively
+- You have 3+ relevant examples/sources for the question
+- Your last 2 searches returned similar information
+</Hard Limits>
+
+<Show Your Thinking>
+After each search tool call, use think_tool to analyze the results:
+- What key information did I find?
+- What's missing?
+- Do I have enough to answer the question comprehensively?
+- Should I search more or provide my answer?
+</Show Your Thinking>
+"""
+
+TAVILY_SEARCH_DESCRIPTION = """Search web and save detailed results to files while returning minimal context.
+
+Performs web search and saves full content to files for context offloading.
+Returns only essential information to help the agent decide on next steps.
+
+Parameters:
+- query (required): Search query to execute
+- max_results (optional, default=1): Maximum number of results to return
+- topic (optional, default='general'): Topic filter - 'general', 'news', or 'finance'
+
+The tool will:
+1. Execute the search using Tavily API
+2. Fetch and process full webpage content
+3. Generate summaries using AI
+4. Save complete content to files in agent state
+5. Return only minimal summaries to prevent context overflow
+
+Files created will be named descriptively based on content (e.g., "anthropic_mcp_overview.md").
+"""
+
+THINK_TOOL_DESCRIPTION = """Tool for strategic reflection on research progress and decision-making.
+
+Use this tool after each search to analyze results and plan next steps systematically.
+This creates a deliberate pause in the research workflow for quality decision-making.
+
+When to use:
+- After receiving search results: What key information did I find?
+- Before deciding next steps: Do I have enough to answer comprehensively?
+- When assessing research gaps: What specific information am I still missing?
+- Before concluding research: Can I provide a complete answer now?
+- How complex is the question: Have I reached the number of search limits?
+
+Reflection should address:
+1. Analysis of current findings - What concrete information have I gathered?
+2. Gap assessment - What crucial information is still missing?
+3. Quality evaluation - Do I have sufficient evidence/examples for a good answer?
+4. Strategic decision - Should I continue searching or provide my answer?
+
+Parameters:
+- reflection (required): Your detailed reflection on research progress, findings, gaps, and next steps
+
+Returns:
+Confirmation that reflection was recorded for decision-making.
+"""
 
 WRITE_TODOS_DESCRIPTION = """Create and manage structured task lists for tracking progress through complex workflows.
 
@@ -250,6 +375,219 @@ class DeepAgentState(AgentState):
 
     todos: NotRequired[list[Todo]]
     files: Annotated[NotRequired[dict[str, str]], file_reducer]
+
+
+class Summary(BaseModel):
+    """Schema for webpage content summarization."""
+    filename: str = Field(description="Name of the file to store.")
+    summary: str = Field(description="Key learnings from the webpage.")
+
+
+def run_tavily_search(
+    search_query: str,
+    max_results: int = 1,
+    topic: Literal["general", "news", "finance"] = "general",
+    include_raw_content: bool = True,
+) -> dict:
+    """Perform search using Tavily API for a single query.
+
+    Args:
+        search_query: Search query to execute
+        max_results: Maximum number of results per query
+        topic: Topic filter for search results
+        include_raw_content: Whether to include raw webpage content
+
+    Returns:
+        Search results dictionary
+    """
+    result = tavily_client.search(
+        query=search_query,
+        max_results=max_results,
+        include_raw_content=include_raw_content,
+        topic=topic
+    )
+    return result
+
+
+def summarize_webpage_content(webpage_content: str) -> Summary:
+    """Summarize webpage content using the configured summarization model.
+
+    Args:
+        webpage_content: Raw webpage content to summarize
+
+    Returns:
+        Summary object with filename and summary
+    """
+    try:
+        # Set up structured output model for summarization
+        structured_model = summarization_model.with_structured_output(Summary)
+
+        # Generate summary
+        summary_and_filename = structured_model.invoke([
+            HumanMessage(content=SUMMARIZE_WEB_SEARCH.format(
+                webpage_content=webpage_content,
+                date=get_today_str()
+            ))
+        ])
+
+        return summary_and_filename
+
+    except Exception:
+        # Return a basic summary object on failure
+        return Summary(
+            filename="search_result.md",
+            summary=webpage_content[:1000] + "..." if len(webpage_content) > 1000 else webpage_content
+        )
+
+
+def process_search_results(results: dict) -> list[dict]:
+    """Process search results by summarizing content where available.
+
+    Args:
+        results: Tavily search results dictionary
+
+    Returns:
+        List of processed results with summaries
+    """
+    processed_results = []
+
+    # Create a client for HTTP requests with timeout
+    HTTPX_CLIENT = httpx.Client(timeout=30.0)
+
+    for result in results.get('results', []):
+        # Get url
+        url = result['url']
+
+        # Read url with timeout and error handling
+        try:
+            response = HTTPX_CLIENT.get(url)
+
+            if response.status_code == 200:
+                # Convert HTML to markdown
+                raw_content = markdownify(response.text)
+                summary_obj = summarize_webpage_content(raw_content)
+            else:
+                # Use Tavily's generated summary
+                raw_content = result.get('raw_content', '')
+                summary_obj = Summary(
+                    filename="URL_error.md",
+                    summary=result.get('content', 'Error reading URL; try another search.')
+                )
+        except (httpx.TimeoutException, httpx.RequestError) as e:
+            # Handle timeout or connection errors gracefully
+            raw_content = result.get('raw_content', '')
+            summary_obj = Summary(
+                filename="connection_error.md",
+                summary=result.get('content', f'Could not fetch URL (timeout/connection error). Try another search.')
+            )
+
+        # Uniquify file names
+        uid = base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b"=").decode("ascii")[:8]
+        name, ext = os.path.splitext(summary_obj.filename)
+        summary_obj.filename = f"{name}_{uid}{ext}"
+
+        processed_results.append({
+            'url': result['url'],
+            'title': result['title'],
+            'summary': summary_obj.summary,
+            'filename': summary_obj.filename,
+            'raw_content': raw_content,
+        })
+
+    return processed_results
+
+
+def tavily_search(
+    query: str,
+    state: Annotated[DeepAgentState, InjectedState],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    max_results: int = 1,
+    topic: Literal["general", "news", "finance"] = "general",
+) -> Command:
+    """Search web and save detailed results to files while returning minimal context.
+
+    Performs web search and saves full content to files for context offloading.
+    Returns only essential information to help the agent decide on next steps.
+
+    Args:
+        query: Search query to execute
+        state: Injected agent state for file storage
+        tool_call_id: Injected tool call identifier
+        max_results: Maximum number of results to return (default: 1)
+        topic: Topic filter - 'general', 'news', or 'finance' (default: 'general')
+
+    Returns:
+        Command that saves full results to files and provides minimal summary
+    """
+    # Execute search
+    search_results = run_tavily_search(
+        query,
+        max_results=max_results,
+        topic=topic,
+        include_raw_content=True,
+    )
+
+    # Process and summarize results
+    processed_results = process_search_results(search_results)
+
+    # Save each result to a file and prepare summary
+    files = state.get("files", {})
+    saved_files = []
+    summaries = []
+
+    for i, result in enumerate(processed_results):
+        # Use the AI-generated filename from summarization
+        filename = result['filename']
+
+        # Create file content with full details
+        file_content = f"""# Search Result: {result['title']}
+
+**URL:** {result['url']}
+**Query:** {query}
+**Date:** {get_today_str()}
+
+## Summary
+{result['summary']}
+
+## Raw Content
+{result['raw_content'] if result['raw_content'] else 'No raw content available'}
+"""
+
+        files[filename] = file_content
+        saved_files.append(filename)
+        summaries.append(f"- {filename}: {result['summary']}...")
+
+    # Create minimal summary for tool message - focus on what was collected
+    summary_text = f"""🔍 Found {len(processed_results)} result(s) for '{query}':
+
+{chr(10).join(summaries)}
+
+Files: {', '.join(saved_files)}
+💡 Use read_file() to access full details when needed."""
+
+    return Command(
+        update={
+            "files": files,
+            "messages": [
+                ToolMessage(summary_text, tool_call_id=tool_call_id)
+            ],
+        }
+    )
+
+
+def think_tool(reflection: str) -> str:
+    """Tool for strategic reflection on research progress and decision-making.
+
+    Use this tool after each search to analyze results and plan next steps systematically.
+    This creates a deliberate pause in the research workflow for quality decision-making.
+
+    Args:
+        reflection: Your detailed reflection on research progress, findings, gaps, and next steps
+
+    Returns:
+        Confirmation that reflection was recorded for decision-making
+    """
+    return f"Reflection recorded: {reflection}"
 
 
 def calculate(
@@ -528,6 +866,10 @@ def create_task_tool(tools, subagents: list[SubAgent], model, state_schema):
 # Register tools with MCP server
 # ============================================================================
 
+# Research tools
+mcp.tool(description=TAVILY_SEARCH_DESCRIPTION)(tavily_search)
+mcp.tool(description=THINK_TOOL_DESCRIPTION)(think_tool)
+
 # Calculator tools
 mcp.tool()(calculate)
 mcp.tool()(calculate_wstate)
@@ -540,6 +882,65 @@ mcp.tool()(read_todos)
 mcp.tool(description=LS_DESCRIPTION)(ls)
 mcp.tool(description=READ_FILE_DESCRIPTION)(read_file)
 mcp.tool(description=WRITE_FILE_DESCRIPTION)(write_file)
+
+
+# ============================================================================
+# Register prompts with MCP server
+# ============================================================================
+
+@mcp.prompt()
+def researcher_prompt(date: str = None) -> str:
+    """System prompt for research sub-agents.
+
+    Args:
+        date: Optional date string to use in the prompt
+
+    Returns:
+        Formatted researcher instructions
+    """
+    if date is None:
+        date = get_today_str()
+    return RESEARCHER_INSTRUCTIONS.format(date=date)
+
+
+@mcp.prompt()
+def todo_usage_instructions() -> str:
+    """Instructions for using the TODO management system.
+
+    Returns:
+        TODO usage instructions
+    """
+    return TODO_USAGE_INSTRUCTIONS
+
+
+@mcp.prompt()
+def file_usage_instructions() -> str:
+    """Instructions for using the virtual file system.
+
+    Returns:
+        File usage instructions
+    """
+    return FILE_USAGE_INSTRUCTIONS
+
+
+@mcp.prompt()
+def subagent_usage_instructions(
+    max_concurrent_research_units: int = 3,
+    max_researcher_iterations: int = 3
+) -> str:
+    """Instructions for delegating tasks to sub-agents.
+
+    Args:
+        max_concurrent_research_units: Maximum number of parallel sub-agents
+        max_researcher_iterations: Maximum number of research iterations
+
+    Returns:
+        Formatted sub-agent usage instructions
+    """
+    return SUBAGENT_USAGE_INSTRUCTIONS.format(
+        max_concurrent_research_units=max_concurrent_research_units,
+        max_researcher_iterations=max_researcher_iterations
+    )
 
 
 if __name__ == "__main__":

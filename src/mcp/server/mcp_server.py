@@ -7,8 +7,9 @@ allowing AI assistants to perform arithmetic operations and manage task lists.
 from typing import Annotated, List, Literal, NotRequired, Union
 
 from fastmcp import FastMCP
+from langchain.agents import create_agent
 from langchain_core.messages import ToolMessage
-from langchain_core.tools import InjectedToolCallId
+from langchain_core.tools import BaseTool, InjectedToolCallId, tool as tool_decorator
 from langgraph.prebuilt import InjectedState
 from langgraph.prebuilt.chat_agent_executor import AgentState
 from langgraph.types import Command
@@ -104,6 +105,64 @@ FILE_USAGE_INSTRUCTIONS = """You have access to a virtual file system to help yo
 2. **Save**: Use write_file() to store the user's request so that we can keep it for later
 3. **Read**: Once you are satisfied with the collected sources, read the saved file and use it to ensure that you directly answer the user's question."""
 
+TASK_DESCRIPTION_PREFIX = """Delegate a task to a specialized sub-agent with isolated context.
+
+This creates a fresh context for the sub-agent containing only the task description,
+preventing context pollution from the parent agent's conversation history.
+
+Parameters:
+- description: Clear, specific task description for the sub-agent
+- subagent_type: Type of specialized agent to use
+
+Available sub-agents:
+{other_agents}
+
+Each sub-agent operates with complete context isolation, receiving only the task description
+without any parent agent history. Results are returned to the parent agent upon completion.
+"""
+
+SUBAGENT_USAGE_INSTRUCTIONS = """You can delegate tasks to sub-agents.
+
+<Task>
+Your role is to coordinate research by delegating specific research tasks to sub-agents.
+</Task>
+
+<Available Tools>
+1. **task(description, subagent_type)**: Delegate research tasks to specialized sub-agents
+   - description: Clear, specific research question or task
+   - subagent_type: Type of agent to use (e.g., "research-agent")
+2. **think_tool(reflection)**: Reflect on the results of each delegated task and plan next steps.
+   - reflection: Your detailed reflection on the results of the task and next steps.
+
+**PARALLEL RESEARCH**: When you identify multiple independent research directions, make multiple **task** tool calls in a single response to enable parallel execution. Use at most {max_concurrent_research_units} parallel agents per iteration.
+</Available Tools>
+
+<Hard Limits>
+**Task Delegation Budgets** (Prevent excessive delegation):
+- **Bias towards focused research** - Use single agent for simple questions, multiple only when clearly beneficial or when you have multiple independent research directions based on the user's request.
+- **Stop when adequate** - Don't over-research; stop when you have sufficient information
+- **Limit iterations** - Stop after {max_researcher_iterations} task delegations if you haven't found adequate sources
+</Hard Limits>
+
+<Scaling Rules>
+**Simple fact-finding, lists, and rankings** can use a single sub-agent:
+- *Example*: "List the top 10 coffee shops in San Francisco" → Use 1 sub-agent, store in `findings_coffee_shops.md`
+
+**Comparisons** can use a sub-agent for each element of the comparison:
+- *Example*: "Compare OpenAI vs. Anthropic vs. DeepMind approaches to AI safety" → Use 3 sub-agents
+- Store findings in separate files: `findings_openai_safety.md`, `findings_anthropic_safety.md`, `findings_deepmind_safety.md`
+
+**Multi-faceted research** can use parallel agents for different aspects:
+- *Example*: "Research renewable energy: costs, environmental impact, and adoption rates" → Use 3 sub-agents
+- Organize findings by aspect in separate files
+
+**Important Reminders:**
+- Each **task** call creates a dedicated research agent with isolated context
+- Sub-agents can't see each other's work - provide complete standalone instructions
+- Use clear, specific language - avoid acronyms or abbreviations in task descriptions
+</Scaling Rules>
+"""
+
 
 # ============================================================================
 # State Definitions
@@ -119,6 +178,22 @@ class Todo(TypedDict):
 
     content: str
     status: Literal["pending", "in_progress", "completed"]
+
+
+class SubAgent(TypedDict):
+    """Configuration for a specialized sub-agent.
+
+    Attributes:
+        name: Unique identifier for the sub-agent
+        description: Description of the sub-agent's capabilities
+        prompt: System prompt for the sub-agent
+        tools: Optional list of tool names available to the sub-agent
+    """
+
+    name: str
+    description: str
+    prompt: str
+    tools: NotRequired[list[str]]
 
 
 def file_reducer(left, right):
@@ -363,6 +438,90 @@ def write_file(
             ],
         }
     )
+
+
+def create_task_tool(tools, subagents: list[SubAgent], model, state_schema):
+    """Create a task delegation tool that enables context isolation through sub-agents.
+
+    This function implements the core pattern for spawning specialized sub-agents with
+    isolated contexts, preventing context clash and confusion in complex multi-step tasks.
+
+    Args:
+        tools: List of available tools that can be assigned to sub-agents
+        subagents: List of specialized sub-agent configurations
+        model: The language model to use for all agents
+        state_schema: The state schema (typically DeepAgentState)
+
+    Returns:
+        A 'task' tool that can delegate work to specialized sub-agents
+    """
+    # Create agent registry
+    agents = {}
+
+    # Build tool name mapping for selective tool assignment
+    tools_by_name = {}
+    for tool_ in tools:
+        if not isinstance(tool_, BaseTool):
+            tool_ = tool_decorator(tool_)
+        tools_by_name[tool_.name] = tool_
+
+    # Create specialized sub-agents based on configurations
+    for _agent in subagents:
+        if "tools" in _agent:
+            # Use specific tools if specified
+            _tools = [tools_by_name[t] for t in _agent["tools"]]
+        else:
+            # Default to all tools
+            _tools = tools
+        agents[_agent["name"]] = create_agent(
+            model, system_prompt=_agent["prompt"], tools=_tools, state_schema=state_schema
+        )
+
+    # Generate description of available sub-agents for the tool description
+    other_agents_string = "\n".join(
+        [f"- {_agent['name']}: {_agent['description']}" for _agent in subagents]
+    )
+
+    @tool_decorator(description=TASK_DESCRIPTION_PREFIX.format(other_agents=other_agents_string))
+    def task(
+        description: str,
+        subagent_type: str,
+        state: Annotated[DeepAgentState, InjectedState],
+        tool_call_id: Annotated[str, InjectedToolCallId],
+    ):
+        """Delegate a task to a specialized sub-agent with isolated context.
+
+        This creates a fresh context for the sub-agent containing only the task description,
+        preventing context pollution from the parent agent's conversation history.
+        """
+        # Validate requested agent type exists
+        if subagent_type not in agents:
+            return f"Error: invoked agent of type {subagent_type}, the only allowed types are {[f'`{k}`' for k in agents]}"
+
+        # Get the requested sub-agent
+        sub_agent = agents[subagent_type]
+
+        # Create isolated context with only the task description
+        # This is the key to context isolation - no parent history
+        state["messages"] = [{"role": "user", "content": description}]
+
+        # Execute the sub-agent in isolation
+        result = sub_agent.invoke(state)
+
+        # Return results to parent agent via Command state update
+        return Command(
+            update={
+                "files": result.get("files", {}),  # Merge any file changes
+                "messages": [
+                    # Sub-agent result becomes a ToolMessage in parent context
+                    ToolMessage(
+                        result["messages"][-1].content, tool_call_id=tool_call_id
+                    )
+                ],
+            }
+        )
+
+    return task
 
 
 # ============================================================================

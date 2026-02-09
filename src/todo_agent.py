@@ -24,14 +24,14 @@ from typing_extensions import TypedDict
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-from mcp_server import (
+from src.mcp.server.mcp_server import (
     TODO_USAGE_INSTRUCTIONS,
     read_todos as mcp_read_todos,
     write_todos as mcp_write_todos,
 )
 
 # Load environment variables
-load_dotenv(os.path.join(".", ".env"), override=True)
+load_dotenv(os.path.join("..", ".env"), override=True)
 
 
 def file_reducer(left: dict[str, str] | None, right: dict[str, str] | None) -> dict[str, str] | None:

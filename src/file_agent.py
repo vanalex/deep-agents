@@ -20,7 +20,7 @@ from langchain_core.tools import tool
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-from mcp_server import (
+from src.mcp.server.mcp_server import (
     FILE_USAGE_INSTRUCTIONS,
     ls as mcp_ls,
     read_file as mcp_read_file,
@@ -29,7 +29,7 @@ from mcp_server import (
 from state import DeepAgentState
 
 # Load environment variables
-load_dotenv(os.path.join(".", ".env"), override=True)
+load_dotenv(os.path.join("..", ".env"), override=True)
 
 # Wrap MCP tools with @tool decorator
 ls = tool(mcp_ls)

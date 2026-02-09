@@ -14,10 +14,10 @@ from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
-from mcp_server import calculate, calculate_wstate, CalcState as MCPCalcState
+from src.mcp.server.mcp_server import calculate, calculate_wstate, CalcState as MCPCalcState
 
 # Load environment variables
-load_dotenv(os.path.join(".", ".env"), override=True)
+load_dotenv(os.path.join("..", ".env"), override=True)
 
 
 # Import tools directly from MCP server

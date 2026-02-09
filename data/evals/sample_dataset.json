@@ -1,0 +1,84 @@
+{
+  "metadata": {
+    "description": "Sample evaluation dataset for agent research tasks",
+    "version": "1.0",
+    "total_examples": 5
+  },
+  "examples": [
+    {
+      "id": "factual_001",
+      "query": "What is the Model Context Protocol (MCP)?",
+      "category": "factual",
+      "difficulty": "easy",
+      "expected_elements": [
+        "Protocol definition",
+        "Purpose/use case",
+        "Key components or features"
+      ],
+      "metadata": {
+        "domain": "ai_infrastructure"
+      }
+    },
+    {
+      "id": "comparison_001",
+      "query": "Compare OpenAI's GPT-4 and Anthropic's Claude 3 in terms of capabilities and safety features",
+      "category": "comparison",
+      "difficulty": "medium",
+      "expected_elements": [
+        "GPT-4 capabilities",
+        "Claude 3 capabilities",
+        "Safety features comparison",
+        "Key differences"
+      ],
+      "metadata": {
+        "domain": "ai_models"
+      }
+    },
+    {
+      "id": "multifaceted_001",
+      "query": "Research the current state of renewable energy: economic costs, environmental impact, and adoption rates across different regions",
+      "category": "multi-faceted",
+      "difficulty": "hard",
+      "expected_elements": [
+        "Economic cost analysis",
+        "Environmental impact data",
+        "Regional adoption statistics",
+        "Multiple renewable energy types covered"
+      ],
+      "metadata": {
+        "domain": "energy",
+        "requires_multiple_sources": true
+      }
+    },
+    {
+      "id": "factual_002",
+      "query": "List the top 5 programming languages in 2024 by popularity",
+      "category": "factual",
+      "difficulty": "easy",
+      "expected_elements": [
+        "5 programming languages listed",
+        "Popularity metrics or ranking source",
+        "Current year data (2024)"
+      ],
+      "metadata": {
+        "domain": "software_engineering"
+      }
+    },
+    {
+      "id": "comparison_002",
+      "query": "Compare React, Vue, and Angular frameworks for web development",
+      "category": "comparison",
+      "difficulty": "medium",
+      "expected_elements": [
+        "React overview",
+        "Vue overview",
+        "Angular overview",
+        "Comparative analysis",
+        "Use case recommendations"
+      ],
+      "metadata": {
+        "domain": "web_development"
+      }
+    }
+  ]
+}

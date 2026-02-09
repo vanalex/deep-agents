@@ -7,6 +7,7 @@ This module implements a complete research agent that:
 - Integrates with MCP server tools including Tavily search
 """
 
+import logging
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -14,6 +15,8 @@ from langchain.chat_models import init_chat_model
 from langchain.agents import create_agent
 
 from src.state import DeepAgentState
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv(override=True)
@@ -118,19 +121,26 @@ def run_research_query(query: str):
 
 
 if __name__ == "__main__":
+    # Configure logging for standalone execution
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
     # Example usage
+    logger.info("Running research query...")
     result = run_research_query("Give me an overview of Model Context Protocol (MCP).")
 
-    # Print the final response
-    print("\n" + "=" * 80)
-    print("FINAL RESPONSE")
-    print("=" * 80)
-    print(result["messages"][-1].content)
+    # Log the final response
+    logger.info("=" * 80)
+    logger.info("FINAL RESPONSE")
+    logger.info("=" * 80)
+    logger.info(result["messages"][-1].content)
 
-    # Print created files
+    # Log created files
     if "files" in result and result["files"]:
-        print("\n" + "=" * 80)
-        print("FILES CREATED")
-        print("=" * 80)
+        logger.info("=" * 80)
+        logger.info("FILES CREATED")
+        logger.info("=" * 80)
         for filename in result["files"].keys():
-            print(f"  - {filename}")
+            logger.info(f"  - {filename}")

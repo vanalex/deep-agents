@@ -7,6 +7,7 @@ This module demonstrates how to:
 - Import tools from MCP server
 """
 
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -15,6 +16,8 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
 from src.mcp.server.mcp_server import calculate, calculate_wstate, CalcState as MCPCalcState
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv(os.path.join("..", ".env"), override=True)
@@ -76,5 +79,11 @@ if __name__ == "__main__":
         }
     )
 
-    print("Result:", result)
-    print("\nOperations performed:", result.get("ops", []))
+    # Configure logging for standalone execution
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    logger.info(f"Result: {result}")
+    logger.info(f"Operations performed: {result.get('ops', [])}")
